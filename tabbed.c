@@ -113,6 +113,7 @@ static Bool gettextprop(Window w, Atom atom, char *text, unsigned int size);
 static void initfont(const char *fontstr);
 static Bool isprotodel(int c);
 static void keypress(const XEvent *e);
+static void keyrelease(const XEvent *e);
 static void killclient(const Arg *arg);
 static void manage(Window win);
 static void maprequest(const XEvent *e);
@@ -126,6 +127,7 @@ static void sendxembed(int c, long msg, long detail, long d1, long d2);
 static void setcmd(int argc, char *argv[], int);
 static void setup(void);
 static void sigchld(int unused);
+static void showbar(const Arg *arg);
 static void spawn(const Arg *arg);
 static int textnw(const char *text, unsigned int len);
 static void toggle(const Arg *arg);
@@ -149,10 +151,11 @@ static void (*handler[LASTEvent]) (const XEvent *) = {
 	[Expose] = expose,
 	[FocusIn] = focusin,
 	[KeyPress] = keypress,
+	[KeyRelease] = keyrelease,
 	[MapRequest] = maprequest,
 	[PropertyNotify] = propertynotify,
 };
-static int bh, obh, wx, wy, ww, wh;
+static int bh, obh, wx, wy, ww, wh, vbh;
 static unsigned int numlockmask;
 static Bool running = True, nextfocus, doinitspawn = True,
             fillagain = False, closelastclient = False,
@@ -169,6 +172,10 @@ static char winid[64];
 static char **cmd;
 static char *wmname = "tabbed";
 static const char *geometry;
+static Bool barvisibility = False;
+
+static Colormap cmap;
+static Visual *visual = NULL;
 
 char *argv0;
 
@@ -254,8 +261,8 @@ configurenotify(const XEvent *e)
 		ww = ev->width;
 		wh = ev->height;
 		XFreePixmap(dpy, dc.drawable);
-		dc.drawable = XCreatePixmap(dpy, root, ww, wh,
-		              DefaultDepth(dpy, screen));
+		dc.drawable = XCreatePixmap(dpy, win, ww, wh,
+		              32);
 
 		if (!obh && (wh <= bh)) {
 			obh = bh;
@@ -324,8 +331,18 @@ void
 drawbar(void)
 {
 	XftColor *col;
-	int c, cc, fc, width;
+	int c, cc, fc, width, nbh;
 	char *name = NULL;
+	char tabtitle[256 + 4];
+
+	nbh = barvisibility ? vbh : 0;
+	if (nbh != bh) {
+		bh = nbh;
+		for (c = 0; c < nclients; c++)
+			XMoveResizeWindow(dpy, clients[c]->win, 0, bh, ww, wh-bh);
+	}
+
+	if (bh == 0) return;
 
 	if (nclients == 0) {
 		dc.x = 0;
@@ -367,7 +384,9 @@ drawbar(void)
 		} else {
 			col = clients[c]->urgent ? dc.urg : dc.norm;
 		}
-		drawtext(clients[c]->name, col);
+		snprintf(tabtitle, sizeof(tabtitle), "%d: %s",
+		         c + 1, clients[c]->name);
+		drawtext(tabtitle, col);
 		dc.x += dc.w;
 		clients[c]->tabx = dc.x;
 	}
@@ -407,7 +426,7 @@ drawtext(const char *text, XftColor col[ColLast])
 			;
 	}
 
-	d = XftDrawCreate(dpy, dc.drawable, DefaultVisual(dpy, screen), DefaultColormap(dpy, screen));
+	d = XftDrawCreate(dpy, dc.drawable, visual, cmap);
 	XftDrawStringUtf8(d, &col[ColFG], dc.font.xfont, x, y, (XftChar8 *) buf, len);
 	XftDrawDestroy(d);
 }
@@ -575,7 +594,7 @@ getcolor(const char *colstr)
 {
 	XftColor color;
 
-	if (!XftColorAllocName(dpy, DefaultVisual(dpy, screen), DefaultColormap(dpy, screen), colstr, &color))
+  if (!XftColorAllocName(dpy, visual, cmap, colstr, &color))
 		die("%s: cannot allocate color '%s'\n", argv0, colstr);
 
 	return color;
@@ -674,6 +693,22 @@ keypress(const XEvent *e)
 }
 
 void
+keyrelease(const XEvent *e)
+{
+	const XKeyEvent *ev = &e->xkey;
+	unsigned int i;
+	KeySym keysym;
+
+	keysym = XkbKeycodeToKeysym(dpy, (KeyCode)ev->keycode, 0, 0);
+	for (i = 0; i < LENGTH(keyreleases); i++) {
+		if (keysym == keyreleases[i].keysym &&
+		    CLEANMASK(keyreleases[i].mod) == CLEANMASK(ev->state) &&
+		    keyreleases[i].func)
+			keyreleases[i].func(&(keyreleases[i].arg));
+	}
+}
+
+void
 killclient(const Arg *arg)
 {
 	XEvent ev;
@@ -717,6 +752,16 @@ manage(Window w)
 			if ((code = XKeysymToKeycode(dpy, keys[i].keysym))) {
 				for (j = 0; j < LENGTH(modifiers); j++) {
 					XGrabKey(dpy, code, keys[i].mod |
+					         modifiers[j], w, True,
+					         GrabModeAsync, GrabModeAsync);
+				}
+			}
+		}
+
+		for (i = 0; i < LENGTH(keyreleases); i++) {
+			if ((code = XKeysymToKeycode(dpy, keyreleases[i].keysym))) {
+				for (j = 0; j < LENGTH(modifiers); j++) {
+					XGrabKey(dpy, code, keyreleases[i].mod |
 					         modifiers[j], w, True,
 					         GrabModeAsync, GrabModeAsync);
 				}
@@ -984,7 +1029,7 @@ setup(void)
 	screen = DefaultScreen(dpy);
 	root = RootWindow(dpy, screen);
 	initfont(font);
-	bh = dc.h = dc.font.height + 2;
+	vbh = dc.h = dc.font.height + 2;
 
 	/* init atoms */
 	wmatom[WMDelete] = XInternAtom(dpy, "WM_DELETE_WINDOW", False);
@@ -1030,22 +1075,64 @@ setup(void)
 			wy = dh + wy - wh - 1;
 	}
 
+	XVisualInfo *vis;
+	XRenderPictFormat *fmt;
+	int nvi;
+	int i;
+
+	XVisualInfo tpl = {
+		.screen = screen,
+		.depth = 32,
+		.class = TrueColor
+	};
+
+	vis = XGetVisualInfo(dpy, VisualScreenMask | VisualDepthMask | VisualClassMask, &tpl, &nvi);
+	for(i = 0; i < nvi; i ++) {
+		fmt = XRenderFindVisualFormat(dpy, vis[i].visual);
+		if (fmt->type == PictTypeDirect && fmt->direct.alphaMask) {
+			visual = vis[i].visual;
+			break;
+		}
+	}
+
+	XFree(vis);
+
+	if (! visual) {
+		fprintf(stderr, "Couldn't find ARGB visual.\n");
+		exit(1);
+	}
+
+	cmap = XCreateColormap( dpy, root, visual, None);
 	dc.norm[ColBG] = getcolor(normbgcolor);
 	dc.norm[ColFG] = getcolor(normfgcolor);
 	dc.sel[ColBG] = getcolor(selbgcolor);
 	dc.sel[ColFG] = getcolor(selfgcolor);
 	dc.urg[ColBG] = getcolor(urgbgcolor);
 	dc.urg[ColFG] = getcolor(urgfgcolor);
-	dc.drawable = XCreatePixmap(dpy, root, ww, wh,
-	                            DefaultDepth(dpy, screen));
-	dc.gc = XCreateGC(dpy, root, 0, 0);
 
-	win = XCreateSimpleWindow(dpy, root, wx, wy, ww, wh, 0,
-	                          dc.norm[ColFG].pixel, dc.norm[ColBG].pixel);
+	XSetWindowAttributes attrs;
+	attrs.background_pixel = dc.norm[ColBG].pixel;
+	attrs.border_pixel = dc.norm[ColFG].pixel;
+	attrs.bit_gravity = NorthWestGravity;
+	attrs.event_mask = FocusChangeMask | KeyPressMask
+		| ExposureMask | VisibilityChangeMask | StructureNotifyMask
+		| ButtonMotionMask | ButtonPressMask | ButtonReleaseMask;
+	attrs.background_pixmap = None ;
+	attrs.colormap = cmap;
+
+	win = XCreateWindow(dpy, root, wx, wy,
+	ww, wh, 0, 32, InputOutput,
+	visual, CWBackPixmap | CWBorderPixel | CWBitGravity
+	| CWEventMask | CWColormap, &attrs);
+
+	dc.drawable = XCreatePixmap(dpy, win, ww, wh,
+	                            32);
+	dc.gc = XCreateGC(dpy, dc.drawable, 0, 0);
+
 	XMapRaised(dpy, win);
 	XSelectInput(dpy, win, SubstructureNotifyMask | FocusChangeMask |
 	             ButtonPressMask | ExposureMask | KeyPressMask |
-	             PropertyChangeMask | StructureNotifyMask |
+	             KeyReleaseMask | PropertyChangeMask | StructureNotifyMask |
 	             SubstructureRedirectMask);
 	xerrorxlib = XSetErrorHandler(xerror);
 
@@ -1076,6 +1163,13 @@ setup(void)
 
 	nextfocus = foreground;
 	focus(-1);
+}
+
+void
+showbar(const Arg *arg)
+{
+	barvisibility = arg->i;
+	drawbar();
 }
 
 void
