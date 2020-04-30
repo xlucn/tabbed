@@ -16,6 +16,7 @@
 #include <X11/Xutil.h>
 #include <X11/XKBlib.h>
 #include <X11/Xft/Xft.h>
+#include <X11/Xresource.h>
 
 #include "arg.h"
 
@@ -86,6 +87,17 @@ typedef struct {
 	Bool closed;
 } Client;
 
+enum resource_type{
+	STRING = 0,
+	INTEGER = 1
+};
+
+typedef struct {
+	char *name;
+	enum resource_type type;
+	void *dst;
+} ResourcePref;
+
 /* function declarations */
 static void buttonpress(const XEvent *e);
 static void cleanup(void);
@@ -125,6 +137,8 @@ static void rotate(const Arg *arg);
 static void run(void);
 static void sendxembed(int c, long msg, long detail, long d1, long d2);
 static void setcmd(int argc, char *argv[], int);
+static int resource_load(XrmDatabase db, char *name, enum resource_type rtype, void *dst);
+static void config_init(void);
 static void setup(void);
 static void sigchld(int unused);
 static void showbar(const Arg *arg);
@@ -1014,6 +1028,53 @@ setcmd(int argc, char *argv[], int replace)
 	cmd[cmd_append_pos] = cmd[cmd_append_pos + 1] = NULL;
 }
 
+int
+resource_load(XrmDatabase db, char *name, enum resource_type rtype, void *dst)
+{
+	char **sdst = dst;
+	int *idst = dst;
+
+	char fullname[256];
+	char fullclass[256];
+	char *type;
+	XrmValue ret;
+
+	snprintf(fullname, sizeof(fullname), "%s.%s", wmname, name);
+	snprintf(fullclass, sizeof(fullclass), "%s.%s", "tabbed", name);
+	fullname[sizeof(fullname) - 1] = fullclass[sizeof(fullclass) - 1] = '\0';
+
+	XrmGetResource(db, fullname, fullclass, &type, &ret);
+	if (ret.addr == NULL || strncmp("String", type, 64))
+		return 1;
+
+	switch (rtype) {
+		case STRING:
+			*sdst = ret.addr;
+			break;
+		case INTEGER:
+			*idst = strtoul(ret.addr, NULL, 10);
+			break;
+	}
+	return 0;
+}
+
+void
+config_init(void)
+{
+	char *resm;
+	XrmDatabase db;
+	ResourcePref *p;
+
+	XrmInitialize();
+	resm = XResourceManagerString(dpy);
+	if (!resm)
+		return;
+
+	db = XrmGetStringDatabase(resm);
+	for (p = resources; p < resources + LENGTH(resources); p++)
+		resource_load(db, p->name, p->type, p->dst);
+}
+
 void
 setup(void)
 {
@@ -1448,6 +1509,7 @@ main(int argc, char *argv[])
 	if (!(dpy = XOpenDisplay(NULL)))
 		die("%s: cannot open display\n", argv0);
 
+	config_init();
 	setup();
 	printf("0x%lx\n", win);
 	fflush(NULL);

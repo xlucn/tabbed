@@ -1,7 +1,7 @@
 /* See LICENSE file for copyright and license details. */
 
 /* appearance */
-static const char font[]        = "monospace:size=12";
+static const char* font         = "monospace:size=12";
 static const char* normbgcolor  = "#222222";
 static const char* normfgcolor  = "#cccccc";
 static const char* selbgcolor   = "#555555";
@@ -11,9 +11,20 @@ static const char* urgfgcolor   = "#cc0000";
 static const char before[]      = "<";
 static const char after[]       = ">";
 static const char titletrim[]   = "...";
-static const int  tabwidth      = 200;
+static       int  tabwidth      = 200;
 static const Bool foreground    = True;
 static       Bool urgentswitch  = False;
+
+ResourcePref resources[] = {
+		{ "font",         STRING,  &font },
+		{ "background",  STRING,  &normbgcolor },
+		{ "foreground",  STRING,  &normfgcolor },
+		{ "foreground",   STRING,  &selbgcolor },
+		{ "background",   STRING,  &selfgcolor },
+		{ "background",   STRING,  &urgbgcolor },
+		{ "color1",   STRING,  &urgfgcolor },
+		{ "tabwidth",     INTEGER, &tabwidth },
+};
 
 /*
  * Where to place a new tab when it is opened. When npisrelative is True,
